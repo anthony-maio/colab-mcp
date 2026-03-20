@@ -18,12 +18,11 @@ import contextlib
 from contextlib import AsyncExitStack
 from fastmcp import FastMCP, Client
 from fastmcp.client.transports import ClientTransport
-from fastmcp.dependencies import CurrentContext
-from fastmcp.server.context import Context
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.server.middleware.tool_injection import ToolInjectionMiddleware
 from fastmcp.server.proxy import FastMCPProxy
 from fastmcp.tools.tool import Tool, ToolResult
+import logging
 from mcp.client.session import ClientSession
 from mcp.types import TextContent
 import webbrowser
@@ -35,8 +34,6 @@ TOOLS_READY_TIMEOUT = 10.0  # secs
 TOOLS_READY_POLL_INTERVAL = 0.5  # secs
 
 FE_CONNECTED_KEY = "fe_connected"
-PROXY_TOKEN_KEY = "proxy_token"
-PROXY_PORT_KEY = "proxy_port"
 INJECTED_TOOL_NAME = "open_colab_browser_connection"
 
 
@@ -127,8 +124,6 @@ class ColabProxyMiddleware(Middleware):
         context.fastmcp_context.set_state(
             FE_CONNECTED_KEY, self.proxy_client.is_connected()
         )
-        context.fastmcp_context.set_state(PROXY_TOKEN_KEY, self.proxy_client.wss.token)
-        context.fastmcp_context.set_state(PROXY_PORT_KEY, self.proxy_client.wss.port)
 
         result = await call_next(context)
 
@@ -185,23 +180,26 @@ class ColabProxyMiddleware(Middleware):
             )
 
 
-async def check_session_proxy_tool_fn(ctx: Context = CurrentContext()) -> bool:
-    fe_connected = ctx.get_state(FE_CONNECTED_KEY)
-    token = ctx.get_state(PROXY_TOKEN_KEY)
-    port = ctx.get_state(PROXY_PORT_KEY)
-    if fe_connected:
-        return True
-    webbrowser.open_new(
-        f"{COLAB}{SCRATCH_PATH}#mcpProxyToken={token}&mcpProxyPort={port}"
+def _make_check_session_proxy_tool(
+    proxy_client: ColabProxyClient,
+) -> Tool:
+    """Create the connection tool with direct references to proxy_client/wss."""
+
+    async def check_session_proxy_tool_fn() -> bool:
+        if proxy_client.is_connected():
+            return True
+        token = proxy_client.wss.token
+        port = proxy_client.wss.port
+        url = f"{COLAB}{SCRATCH_PATH}#mcpProxyToken={token}&mcpProxyPort={port}"
+        logging.info(f"Opening Colab browser connection: {url}")
+        webbrowser.open_new(url)
+        return False
+
+    return Tool.from_function(
+        fn=check_session_proxy_tool_fn,
+        name=INJECTED_TOOL_NAME,
+        description="Opens a connection to a Google Colab browser session and unlocks notebook editing tools. Returns a boolean representing whether the connection attempt succeeded",
     )
-    return False
-
-
-check_session_proxy_tool = Tool.from_function(
-    fn=check_session_proxy_tool_fn,
-    name=INJECTED_TOOL_NAME,
-    description="Opens a connection to a Google Colab browser session and unlocks notebook editing tools. Returns a boolean representing whether the connection attempt succeeded",
-)
 
 
 class ColabSessionProxy:
@@ -221,6 +219,7 @@ class ColabSessionProxy:
             client_factory=proxy_client.client_factory,
             instructions="Connects to a user's Google Colab session in a browser and allows for interactions with their Google Colab notebook",
         )
+        check_session_proxy_tool = _make_check_session_proxy_tool(proxy_client)
         # ColabProxyMiddleware must be first because it sets the fe_connected state
         self.middleware.append(ColabProxyMiddleware(proxy_client))
         self.middleware.append(

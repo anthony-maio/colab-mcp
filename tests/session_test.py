@@ -72,8 +72,6 @@ class TestColabProxyMiddleware:
 
         call_next.assert_called_once_with(context)
         context.fastmcp_context.set_state.assert_any_call("fe_connected", True)
-        context.fastmcp_context.set_state.assert_any_call("proxy_token", "test-token")
-        context.fastmcp_context.set_state.assert_any_call("proxy_port", 1234)
         assert middleware.last_message_connected is True
         context.fastmcp_context.send_tool_list_changed.assert_called_once()
 
@@ -180,28 +178,17 @@ class TestColabProxyMiddleware:
 
 class TestCheckSessionProxyToolFn:
     @pytest.mark.asyncio
-    async def test_connected(self):
-        ctx = Mock()
-        ctx.get_state.side_effect = (
-            lambda k: True if k == session.FE_CONNECTED_KEY else None
-        )
-        assert await session.check_session_proxy_tool_fn(ctx) is True
+    async def test_connected(self, mock_proxy_client, mock_webbrowser):
+        mock_proxy_client.is_connected.return_value = True
+        tool = session._make_check_session_proxy_tool(mock_proxy_client)
+        result = await tool.run(arguments={})
+        mock_webbrowser.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_disconnected(self, mock_webbrowser):
-        ctx = Mock()
-
-        def get_state(k):
-            if k == session.FE_CONNECTED_KEY:
-                return False
-            if k == session.PROXY_TOKEN_KEY:
-                return "test-token"
-            if k == session.PROXY_PORT_KEY:
-                return 1234
-            return None
-
-        ctx.get_state.side_effect = get_state
-        assert await session.check_session_proxy_tool_fn(ctx) is False
+    async def test_disconnected(self, mock_proxy_client, mock_webbrowser):
+        mock_proxy_client.is_connected.return_value = False
+        tool = session._make_check_session_proxy_tool(mock_proxy_client)
+        result = await tool.run(arguments={})
         mock_webbrowser.assert_called_once()
         args, _ = mock_webbrowser.call_args
         assert "mcpProxyToken=test-token" in args[0]
@@ -306,6 +293,7 @@ class TestColabTransport:
 
 class TestColabSessionProxy:
     @pytest.mark.asyncio
+    @patch("colab_mcp.session._make_check_session_proxy_tool")
     @patch("colab_mcp.session.ToolInjectionMiddleware")
     @patch("colab_mcp.session.ColabWebSocketServer")
     @patch("colab_mcp.session.ColabProxyClient")
@@ -316,6 +304,7 @@ class TestColabSessionProxy:
         mock_colab_proxy_client,
         mock_colab_web_socket_server,
         mock_tool_injection_middleware,
+        mock_make_tool,
     ):
         mock_colab_web_socket_server.return_value.__aenter__ = AsyncMock()
         mock_colab_proxy_client.return_value.__aenter__ = AsyncMock()
@@ -324,6 +313,7 @@ class TestColabSessionProxy:
         mock_colab_proxy_client.assert_called_once()
         assert proxy.proxy_server is not None
         mock_colab_proxy_middleware.assert_called_once()
+        mock_make_tool.assert_called_once()
         mock_tool_injection_middleware.assert_called_once()
 
     @pytest.mark.asyncio

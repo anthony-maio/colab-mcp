@@ -31,6 +31,8 @@ import webbrowser
 from colab_mcp.websocket_server import ColabWebSocketServer, COLAB, SCRATCH_PATH
 
 UI_CONNECTION_TIMEOUT = 60.0  # secs
+TOOLS_READY_TIMEOUT = 10.0  # secs
+TOOLS_READY_POLL_INTERVAL = 0.5  # secs
 
 FE_CONNECTED_KEY = "fe_connected"
 PROXY_TOKEN_KEY = "proxy_token"
@@ -74,6 +76,21 @@ class ColabProxyClient:
                 connection_tasks,
                 timeout=UI_CONNECTION_TIMEOUT,
             )
+
+    async def await_tools_ready(self) -> list[str]:
+        """Poll the proxy client until remote tools are available or timeout."""
+        if not self.is_connected():
+            return []
+        deadline = asyncio.get_event_loop().time() + TOOLS_READY_TIMEOUT
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                tools = await self.proxy_mcp_client.list_tools()
+                if tools:
+                    return [t.name for t in tools]
+            except Exception:
+                pass
+            await asyncio.sleep(TOOLS_READY_POLL_INTERVAL)
+        return []
 
     def client_factory(self):
         if self.is_connected():
@@ -141,11 +158,20 @@ class ColabProxyMiddleware(Middleware):
         await self.proxy_client.await_proxy_connection()
         if self.proxy_client.is_connected():
             await context.fastmcp_context.report_progress(
-                progress=3, total=3, message="The Colab UI is successfully connected!"
+                progress=3, total=4, message="The Colab UI is successfully connected!"
             )
+            # Wait for the browser-side tools to become queryable
+            tool_names = await self.proxy_client.await_tools_ready()
+            await context.fastmcp_context.report_progress(
+                progress=4, total=4, message=f"Tools ready: {tool_names}"
+            )
+            # Notify the client that the tool list has changed so it re-fetches
+            await context.fastmcp_context.send_tool_list_changed()
+            self.last_message_connected = True
+            tools_text = ", ".join(tool_names) if tool_names else "none detected yet"
             return ToolResult(
-                content=[TextContent(type="text", text="true")],
-                structured_content={"result": True},
+                content=[TextContent(type="text", text=f"Connection successful. Available notebook tools: {tools_text}. You can now use these tools to interact with the Colab notebook.")],
+                structured_content={"result": True, "available_tools": tool_names},
             )
         else:
             await context.fastmcp_context.report_progress(

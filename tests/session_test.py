@@ -117,16 +117,50 @@ class TestColabProxyMiddleware:
         middleware = session.ColabProxyMiddleware(mock_proxy_client)
         context = Mock()
         context.fastmcp_context.report_progress = AsyncMock()
+        context.fastmcp_context.send_tool_list_changed = AsyncMock()
         context.message.name = session.INJECTED_TOOL_NAME
         mock_proxy_client.is_connected.side_effect = [False, True]
         mock_proxy_client.await_proxy_connection = AsyncMock()
+        mock_proxy_client.await_tools_ready = AsyncMock(
+            return_value=["add_cell", "run_cell"]
+        )
         call_next = AsyncMock()
 
         result = await middleware.on_call_tool(context, call_next)
 
         mock_proxy_client.await_proxy_connection.assert_called_once()
+        mock_proxy_client.await_tools_ready.assert_called_once()
         context.fastmcp_context.report_progress.assert_called()
-        assert result.structured_content == {"result": True}
+        context.fastmcp_context.send_tool_list_changed.assert_called_once()
+        assert result.structured_content == {
+            "result": True,
+            "available_tools": ["add_cell", "run_cell"],
+        }
+        assert "add_cell" in result.content[0].text
+        assert middleware.last_message_connected is True
+
+    @pytest.mark.asyncio
+    async def test_on_call_tool_connected_but_no_tools(self, mock_proxy_client):
+        """Tests that connection succeeds but no remote tools are found."""
+        middleware = session.ColabProxyMiddleware(mock_proxy_client)
+        context = Mock()
+        context.fastmcp_context.report_progress = AsyncMock()
+        context.fastmcp_context.send_tool_list_changed = AsyncMock()
+        context.message.name = session.INJECTED_TOOL_NAME
+        mock_proxy_client.is_connected.side_effect = [False, True]
+        mock_proxy_client.await_proxy_connection = AsyncMock()
+        mock_proxy_client.await_tools_ready = AsyncMock(return_value=[])
+        call_next = AsyncMock()
+
+        result = await middleware.on_call_tool(context, call_next)
+
+        mock_proxy_client.await_tools_ready.assert_called_once()
+        context.fastmcp_context.send_tool_list_changed.assert_called_once()
+        assert result.structured_content == {
+            "result": True,
+            "available_tools": [],
+        }
+        assert "none detected yet" in result.content[0].text
 
     @pytest.mark.asyncio
     async def test_on_call_tool_timeout(self, mock_proxy_client):
@@ -202,6 +236,40 @@ class TestColabProxyClient:
         with patch("colab_mcp.session.UI_CONNECTION_TIMEOUT", 0.1):
             await client.await_proxy_connection()
         await client._start_task
+
+    @pytest.mark.asyncio
+    async def test_await_tools_ready_returns_tool_names(self, mock_wss):
+        client = session.ColabProxyClient(mock_wss)
+        mock_wss.connection_live.set()
+        mock_tool = Mock()
+        mock_tool.name = "add_cell"
+        client.proxy_mcp_client = AsyncMock()
+        client.proxy_mcp_client.list_tools = AsyncMock(return_value=[mock_tool])
+        with patch("colab_mcp.session.TOOLS_READY_TIMEOUT", 1.0):
+            result = await client.await_tools_ready()
+        assert result == ["add_cell"]
+
+    @pytest.mark.asyncio
+    async def test_await_tools_ready_polls_until_available(self, mock_wss):
+        client = session.ColabProxyClient(mock_wss)
+        mock_wss.connection_live.set()
+        mock_tool = Mock()
+        mock_tool.name = "run_cell"
+        client.proxy_mcp_client = AsyncMock()
+        # First call returns empty, second returns tools
+        client.proxy_mcp_client.list_tools = AsyncMock(
+            side_effect=[[], [mock_tool]]
+        )
+        with patch("colab_mcp.session.TOOLS_READY_TIMEOUT", 5.0), \
+             patch("colab_mcp.session.TOOLS_READY_POLL_INTERVAL", 0.01):
+            result = await client.await_tools_ready()
+        assert result == ["run_cell"]
+
+    @pytest.mark.asyncio
+    async def test_await_tools_ready_not_connected(self, mock_wss):
+        client = session.ColabProxyClient(mock_wss)
+        result = await client.await_tools_ready()
+        assert result == []
 
     @pytest.mark.asyncio
     @patch("colab_mcp.session.Client")

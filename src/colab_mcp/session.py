@@ -36,6 +36,77 @@ TOOLS_READY_POLL_INTERVAL = 0.5  # secs
 FE_CONNECTED_KEY = "fe_connected"
 INJECTED_TOOL_NAME = "open_colab_browser_connection"
 
+NOT_CONNECTED_MSG = (
+    "Not connected to a Google Colab browser session. "
+    "Please call open_colab_browser_connection first to establish a connection, "
+    "then retry this tool."
+)
+
+
+def _make_stub_server() -> FastMCP:
+    """Create a FastMCP server with pre-registered notebook tool stubs.
+
+    These stubs ensure that clients which snapshot the tool list at startup
+    (and ignore ``notifications/tools/list_changed``) can still see notebook
+    tools before a browser connection is established.  When the browser
+    connects, ``client_factory`` switches to the real client and
+    ``ProxyToolManager`` forwards calls to the browser-side MCP server.
+    """
+    stub = FastMCP("colab-notebook-stubs")
+
+    @stub.tool(
+        description=(
+            "Add a new code cell to the Colab notebook. "
+            "Requires an active browser connection via "
+            "open_colab_browser_connection."
+        )
+    )
+    async def add_code_cell(
+        code: str = "",
+        cellIndex: int = -1,
+    ) -> str:
+        return NOT_CONNECTED_MSG
+
+    @stub.tool(
+        description=(
+            "Add a new text/markdown cell to the Colab notebook. "
+            "Requires an active browser connection via "
+            "open_colab_browser_connection."
+        )
+    )
+    async def add_text_cell(
+        content: str = "",
+        cellIndex: int = -1,
+    ) -> str:
+        return NOT_CONNECTED_MSG
+
+    @stub.tool(
+        description=(
+            "Execute a cell in the Colab notebook. "
+            "Requires an active browser connection via "
+            "open_colab_browser_connection."
+        )
+    )
+    async def execute_cell(
+        cellIndex: int = 0,
+    ) -> str:
+        return NOT_CONNECTED_MSG
+
+    @stub.tool(
+        description=(
+            "Update the contents of an existing cell in the Colab notebook. "
+            "Requires an active browser connection via "
+            "open_colab_browser_connection."
+        )
+    )
+    async def update_cell(
+        cellId: str = "",
+        content: str = "",
+    ) -> str:
+        return NOT_CONNECTED_MSG
+
+    return stub
+
 
 class ColabTransport(ClientTransport):
     def __init__(self, wss: ColabWebSocketServer):
@@ -55,7 +126,7 @@ class ColabTransport(ClientTransport):
 class ColabProxyClient:
     def __init__(self, wss: ColabWebSocketServer):
         self.wss = wss
-        self.stubbed_mcp_client = Client(FastMCP())
+        self.stubbed_mcp_client = Client(_make_stub_server())
         self.proxy_mcp_client: Client | None = None
         self._exit_stack = AsyncExitStack()
         self._start_task = None

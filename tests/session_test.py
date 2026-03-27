@@ -14,6 +14,7 @@
 
 import asyncio
 from colab_mcp import session
+from fastmcp import Client
 from fastmcp.server.middleware import MiddlewareContext
 import pytest
 from unittest.mock import patch, AsyncMock, Mock
@@ -272,6 +273,39 @@ class TestColabProxyClient:
 
         mock_colab_transport.assert_called_once_with(mock_wss)
         mock_client.assert_called_with(mock_colab_transport.return_value)
+
+
+class TestStubServer:
+    def test_stub_server_has_expected_tools(self):
+        stub = session._make_stub_server()
+        tool_names = {name for name in stub._tool_manager._tools}
+        assert "add_code_cell" in tool_names
+        assert "add_text_cell" in tool_names
+        assert "execute_cell" in tool_names
+        assert "update_cell" in tool_names
+
+    @pytest.mark.asyncio
+    async def test_stub_tools_return_not_connected_message(self):
+        stub = session._make_stub_server()
+        client = Client(stub)
+        async with client:
+            tools = await client.list_tools()
+            assert len(tools) >= 4
+            result = await client.call_tool("add_code_cell", {"code": "print('hi')"})
+            assert session.NOT_CONNECTED_MSG in result.content[0].text
+
+    @pytest.mark.asyncio
+    async def test_stub_client_lists_tools_when_disconnected(self, mock_wss):
+        proxy_client = session.ColabProxyClient(mock_wss)
+        client = proxy_client.client_factory()
+        assert client is proxy_client.stubbed_mcp_client
+        async with client:
+            tools = await client.list_tools()
+            tool_names = [t.name for t in tools]
+            assert "add_code_cell" in tool_names
+            assert "add_text_cell" in tool_names
+            assert "execute_cell" in tool_names
+            assert "update_cell" in tool_names
 
 
 class TestColabTransport:
